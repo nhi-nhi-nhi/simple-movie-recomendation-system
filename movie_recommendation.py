@@ -139,7 +139,7 @@ class MovieRecommendationSystem:
             })
         
         elif model_type == 'xgboost+knn':
-                    # XGBoost predictions
+            # XGBoost predictions
             selected_movie_features = selected_movie[self.feature_columns].values
             selected_movie_features_scaled = self.scaler.transform(selected_movie_features)
             
@@ -160,7 +160,7 @@ class MovieRecommendationSystem:
             knn = NearestNeighbors(n_neighbors=6, metric='cosine')  # 6 neighbors to exclude the selected movie itself
             knn.fit(movie_features_scaled_knn)
 
-            selected_movie_idx = filtered_df[filtered_df['Title_Lower'] == selected_movie_name].index[0]
+            selected_movie_idx = self.df[self.df['Title_Lower'] == selected_movie_name_lower].index[0]
             selected_movie_features_knn = movie_features_scaled_knn[selected_movie_idx].reshape(1, -1)
 
             # Find the top 5 most similar movies using KNN
@@ -286,6 +286,6 @@ if __name__ == "__main__":
     
     # Get movie recommendations
     # model = 'xgboost'
-    model = 'knn'
-    # model = 'xgboost+knn'
+    # model = 'knn'
+    model = 'xgboost+knn'
     movie_recommender.recommend_movies(model)
