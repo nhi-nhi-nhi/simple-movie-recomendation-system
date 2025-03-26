@@ -86,12 +86,11 @@ class MovieRecommendationSystem:
         if selected_movie.empty:
             print("Movie not found in the dataset. Please try again with a different title.")
             return pd.DataFrame()  # Return an empty DataFrame if the movie is not found
-        
-        selected_movie_features = selected_movie[self.feature_columns].values
-        selected_movie_features_scaled = self.scaler.transform(selected_movie_features)
-        
-        if model_type == 'xgboost':
 
+        if model_type == 'xgboost':
+            selected_movie_features = selected_movie[self.feature_columns].values
+            selected_movie_features_scaled = self.scaler.transform(selected_movie_features)
+        
             similarity_scores = []
 
             for i in range(len(filtered_df)):
@@ -112,12 +111,16 @@ class MovieRecommendationSystem:
             top_5_similar_movies = similarity_df.sort_values(by='Similarity Score', ascending=False).head(6)[1:]
 
         elif model_type == 'knn':
-            knn = NearestNeighbors(n_neighbors=6, metric='euclidean')  # 6 neighbors to exclude the selected movie itself
-            knn.fit(selected_movie_features_scaled)
+            scaler = StandardScaler()
+            movie_features = filtered_df[self.feature_columns].values
+            movie_features_scaled = scaler.fit_transform(movie_features)
 
-            # Step 5: Find similar movies (Example: "The Godfather")
-            selected_movie_idx = filtered_df[filtered_df['Title'] == "The Godfather"].index[0]
-            selected_movie_features = selected_movie_features_scaled[selected_movie_idx].reshape(1, -1)
+            # Step 4: Implement KNN for finding similar movies
+            knn = NearestNeighbors(n_neighbors=6, metric='cosine')  # 6 neighbors to exclude the selected movie itself
+            knn.fit(movie_features_scaled)
+
+            selected_movie_idx = self.df[self.df['Title_Lower'] == selected_movie_name_lower].index[0]
+            selected_movie_features = movie_features_scaled[selected_movie_idx].reshape(1, -1)
 
             # Find the top 5 most similar movies
             distances, indices = knn.kneighbors(selected_movie_features, n_neighbors=6)
@@ -129,8 +132,72 @@ class MovieRecommendationSystem:
             top_5_indices = indices[0][1:]  # Skip the first one (the movie itself)
             top_5_scores = similarity_scores[0][1:]
             top_5_movies = filtered_df.iloc[top_5_indices][['Title']].copy()
-            top_5_movies['Similarity Score'] = top_5_scores
-                    
+            
+            top_5_similar_movies = pd.DataFrame({
+                'Title': top_5_movies['Title'],
+                'Similarity Score': top_5_scores
+            })
+        
+        elif model_type == 'xgboost+knn':
+                    # XGBoost predictions
+            selected_movie_features = selected_movie[self.feature_columns].values
+            selected_movie_features_scaled = self.scaler.transform(selected_movie_features)
+            
+            xgboost_similarity_scores = []
+            for i in range(len(filtered_df)):
+                movie_features = self.X_scaled[i]
+                pair_features = np.concatenate([selected_movie_features_scaled.flatten(), movie_features.flatten()])
+                
+                # Predict similarity for the movie pair using XGBoost
+                predicted_similarity = self.model.predict(pair_features.reshape(1, -1))
+                xgboost_similarity_scores.append(predicted_similarity[0])
+            
+            # KNN predictions
+            scaler_knn = StandardScaler()
+            movie_features_knn = filtered_df[self.feature_columns].values
+            movie_features_scaled_knn = scaler_knn.fit_transform(movie_features_knn)
+
+            knn = NearestNeighbors(n_neighbors=6, metric='cosine')  # 6 neighbors to exclude the selected movie itself
+            knn.fit(movie_features_scaled_knn)
+
+            selected_movie_idx = filtered_df[filtered_df['Title_Lower'] == selected_movie_name].index[0]
+            selected_movie_features_knn = movie_features_scaled_knn[selected_movie_idx].reshape(1, -1)
+
+            # Find the top 5 most similar movies using KNN
+            distances, indices = knn.kneighbors(selected_movie_features_knn, n_neighbors=6)
+
+            # Convert distances to similarity scores (higher similarity means smaller distance)
+            knn_similarity_scores = 1 - distances / np.max(distances)
+
+            # Rank movies based on similarity score, skipping the first one (the selected movie itself)
+            top_5_indices_knn = indices[0][1:]  # Skip the first one (the movie itself)
+            top_5_scores_knn = knn_similarity_scores[0][1:]
+            top_5_movies_knn = filtered_df.iloc[top_5_indices_knn][['Title']].copy()
+            top_5_movies_knn['Similarity Score'] = top_5_scores_knn
+
+            # Combine the similarity scores from both models (average or other method)
+            similarity_df_xgboost = pd.DataFrame({
+                'Title': filtered_df['Title'],
+                'XGBoost Similarity Score': xgboost_similarity_scores
+            })
+
+            similarity_df_knn = pd.DataFrame({
+                'Title': top_5_movies_knn['Title'],
+                'KNN Similarity Score': top_5_movies_knn['Similarity Score']
+            })
+
+            # Merge both similarity dataframes
+            combined_similarity = pd.merge(similarity_df_xgboost, similarity_df_knn, on='Title')
+
+            # Combine the scores (e.g., average them)
+            combined_similarity['Combined Similarity Score'] = (combined_similarity['XGBoost Similarity Score'] + combined_similarity['KNN Similarity Score']) / 2
+
+            # Sort by the combined similarity score and return the top 5
+            top_5_combined = combined_similarity.sort_values(by='Combined Similarity Score', ascending=False).head(5)
+
+            top_5_similar_movies = top_5_combined[['Title', 'Combined Similarity Score']]
+
+
         return top_5_similar_movies
 
     def explain_similarity(self, selected_movie, similar_movie, feature_columns):
@@ -220,4 +287,5 @@ if __name__ == "__main__":
     # Get movie recommendations
     # model = 'xgboost'
     model = 'knn'
+    # model = 'xgboost+knn'
     movie_recommender.recommend_movies(model)
