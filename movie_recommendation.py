@@ -1,13 +1,16 @@
 import pandas as pd
 import numpy as np
-import tensorflow as tf
+import xgboost as xgb
 from sklearn.preprocessing import StandardScaler
+import ast
+from sklearn.neighbors import NearestNeighbors
 
 class MovieRecommendationSystem:
     def __init__(self, dataset_path, model_path):
-        # Load dataset and model
+        # Load dataset and XGBoost model
         self.df = pd.read_csv(dataset_path)
-        self.model = tf.keras.models.load_model(model_path)
+        self.model = xgb.XGBRegressor()  # Use XGBoost regressor
+        self.model.load_model(model_path)  # Load the trained XGBoost model
         self.scaler = StandardScaler()
         
         # Feature columns for the model
@@ -63,7 +66,6 @@ class MovieRecommendationSystem:
         if genre_filter:
             filtered_df = filtered_df[filtered_df['Genres'].apply(lambda x: any(genre.lower() in x.lower() for genre in genre_filter))]
 
-        
         # Apply IMDb Rating Filter if provided
         if rating_range[0] is not None and rating_range[1] is not None:
             filtered_df = filtered_df[(filtered_df['IMDb Rating'] >= rating_range[0]) & (filtered_df['IMDb Rating'] <= rating_range[1])]
@@ -74,7 +76,7 @@ class MovieRecommendationSystem:
 
         return filtered_df
 
-    def predict_similarity(self, selected_movie_name, filtered_df):
+    def predict_similarity(self, selected_movie_name, filtered_df, model_type):
         # Normalize the selected movie name to lowercase for comparison
         selected_movie_name_lower = selected_movie_name.lower()
         
@@ -88,27 +90,92 @@ class MovieRecommendationSystem:
         selected_movie_features = selected_movie[self.feature_columns].values
         selected_movie_features_scaled = self.scaler.transform(selected_movie_features)
         
-        similarity_scores = []
+        if model_type == 'xgboost':
 
-        for i in range(len(filtered_df)):
-            movie_features = self.X_scaled[i]
-            pair_features = np.concatenate([selected_movie_features_scaled.flatten(), movie_features.flatten()])
-            
-            # Predict similarity for the movie pair
-            predicted_similarity = self.model.predict(pair_features.reshape(1, -1))
-            similarity_scores.append(predicted_similarity[0][0])
+            similarity_scores = []
 
-        # Step 4: Rank movies based on similarity score
-        similarity_df = pd.DataFrame({
-            'Title': filtered_df['Title'],
-            'Similarity Score': similarity_scores
-        })
+            for i in range(len(filtered_df)):
+                movie_features = self.X_scaled[i]
+                pair_features = np.concatenate([selected_movie_features_scaled.flatten(), movie_features.flatten()])
+                
+                # Predict similarity for the movie pair
+                predicted_similarity = self.model.predict(pair_features.reshape(1, -1))
+                similarity_scores.append(predicted_similarity[0])
 
-        # Return top 5 most similar movies
-        top_5_similar_movies = similarity_df.sort_values(by='Similarity Score', ascending=False).head(6)[1:]
+            # Rank movies based on similarity score
+            similarity_df = pd.DataFrame({
+                'Title': filtered_df['Title'],
+                'Similarity Score': similarity_scores
+            })
+
+            # Return top 5 most similar movies
+            top_5_similar_movies = similarity_df.sort_values(by='Similarity Score', ascending=False).head(6)[1:]
+
+        elif model_type == 'knn':
+            knn = NearestNeighbors(n_neighbors=6, metric='euclidean')  # 6 neighbors to exclude the selected movie itself
+            knn.fit(selected_movie_features_scaled)
+
+            # Step 5: Find similar movies (Example: "The Godfather")
+            selected_movie_idx = filtered_df[filtered_df['Title'] == "The Godfather"].index[0]
+            selected_movie_features = selected_movie_features_scaled[selected_movie_idx].reshape(1, -1)
+
+            # Find the top 5 most similar movies
+            distances, indices = knn.kneighbors(selected_movie_features, n_neighbors=6)
+
+            # Convert distances to similarity scores (higher similarity means smaller distance)
+            similarity_scores = 1 - distances / np.max(distances)
+
+            # Step 6: Rank movies based on similarity score
+            top_5_indices = indices[0][1:]  # Skip the first one (the movie itself)
+            top_5_scores = similarity_scores[0][1:]
+            top_5_movies = filtered_df.iloc[top_5_indices][['Title']].copy()
+            top_5_movies['Similarity Score'] = top_5_scores
+                    
         return top_5_similar_movies
 
-    def recommend_movies(self):
+    def explain_similarity(self, selected_movie, similar_movie, feature_columns):
+        explanation = []
+        
+        # Loop through the list of features to compare
+        for feature in ['Genres', 'IMDb Rating', 'Oscars', 'Runtime (mins)']:
+            if feature in selected_movie.columns and feature in similar_movie.columns:
+                # Access the values of the selected movie and the similar movie
+                val1 = selected_movie[feature].values[0]
+                val2 = similar_movie[feature].values[0]
+                
+                # Handle the 'Genres' feature
+                if feature == 'Genres':
+                    # Handle cases where Genres is either a string or a list
+                    try:
+                        if isinstance(val1, str):
+                            genres1 = set(ast.literal_eval(val1)) if val1.startswith("[") else set(val1.split(', '))
+                        else:  # Assume it's a list if not a string
+                            genres1 = set(val1)
+                        
+                        if isinstance(val2, str):
+                            genres2 = set(ast.literal_eval(val2)) if val2.startswith("[") else set(val2.split(', '))
+                        else:  # Assume it's a list if not a string
+                            genres2 = set(val2)
+                        
+                        # Find common genres between the two movies
+                        common_genres = genres1 & genres2
+                        if common_genres:
+                            explanation.append(f"Similar genre(s): {common_genres}")
+                    except:
+                        explanation.append("Error processing genres.")
+                
+                # Handle 'IMDb Rating' and 'Oscars' with a close value condition
+                elif feature in ['IMDb Rating', 'Oscars'] and abs(val1 - val2) < 1.0:
+                    explanation.append(f"Close {feature}: {val1} vs {val2}")
+                
+                # Handle 'Runtime (mins)' with a close value condition
+                elif feature == 'Runtime (mins)' and abs(val1 - val2) < 20:
+                    explanation.append(f"Close runtime: {val1} mins vs {val2} mins")
+                    
+        return "; ".join(explanation)
+
+
+    def recommend_movies(self, model):
         # Get user input
         selected_movie_name, genre_filter, rating_range, runtime_range = self.get_user_input()
 
@@ -116,18 +183,41 @@ class MovieRecommendationSystem:
         filtered_df = self.apply_filters(selected_movie_name, genre_filter, rating_range, runtime_range)
 
         # Predict similarity and get top 5 recommendations
-        top_5_similar_movies = self.predict_similarity(selected_movie_name, filtered_df)
+        top_5_similar_movies = self.predict_similarity(selected_movie_name, filtered_df, model)
 
         # Display the results
         if not top_5_similar_movies.empty:
             print("\nTop 5 recommended movies based on your selection and filters:")
             print(top_5_similar_movies)
+            
+            # Generate explanations for the top 5 similar movies
+            explanations = []
+            
+            # Get the selected movie to pass it to the explain_similarity function
+            selected_movie = self.df[self.df['Title_Lower'] == selected_movie_name.lower()]
+
+            for index, row in top_5_similar_movies.iterrows():
+                movie_title = row['Title']
+                similar_movie = filtered_df[filtered_df['Title'] == movie_title]
+                
+                # Get the explanation for each similar movie
+                explanation = self.explain_similarity(selected_movie, similar_movie, self.feature_columns)
+                explanations.append((movie_title, explanation))
+            
+            # Display the explanations
+            for movie_title, explanation in explanations:
+                print(f"Movie: {movie_title}")
+                print(f"Explanation: {explanation}")
+                print("="*50)
         else:
             print("No movies were found matching your criteria.")
 
+
 if __name__ == "__main__":
     # Create an instance of the MovieRecommendationSystem
-    movie_recommender = MovieRecommendationSystem(dataset_path='top100_preprocessed.csv', model_path='movie_similarity_model.h5')
+    movie_recommender = MovieRecommendationSystem(dataset_path='top100_preprocessed.csv', model_path='xgboost_movie_similarity_model.json')
     
     # Get movie recommendations
-    movie_recommender.recommend_movies()
+    # model = 'xgboost'
+    model = 'knn'
+    movie_recommender.recommend_movies(model)
